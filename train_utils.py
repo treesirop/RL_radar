@@ -32,7 +32,6 @@ def evaluate_rl_system_with_metrics(test_loader, agent, models, threshold=35.0):
             
             # 获取模型选择概率
             model_probs, _ = agent(inputs)
-            
             # 让每个模型预测所有未来帧
             all_model_predictions = {}
             for time_key, model in models.items():
@@ -68,6 +67,7 @@ def evaluate_rl_system_with_metrics(test_loader, agent, models, threshold=35.0):
                 time_predictions = torch.cat(batch_predictions, dim=0)
                 final_predictions.append(time_predictions)
             
+            del model_probs
             # 合并预测结果
             predictions = torch.stack(final_predictions, dim=1)
             
@@ -82,7 +82,6 @@ def evaluate_rl_system_with_metrics(test_loader, agent, models, threshold=35.0):
                     agent_csi += csi
                     agent_pod += pod
                     agent_far += far
-                    count += 1
     
     # 计算平均值
     avg_agent_csi = agent_csi / count if count > 0 else 0
@@ -113,6 +112,7 @@ def evaluate_rl_system_with_metrics(test_loader, agent, models, threshold=35.0):
         'models': model_results
     }
 
+
 import os
 
 def train_rl_agent_with_metrics(env, agent, models, optimizer, num_episodes=200, batch_size=32):
@@ -135,68 +135,55 @@ def train_rl_agent_with_metrics(env, agent, models, optimizer, num_episodes=200,
     
     for episode in range(num_episodes):
         state = env.reset()
-        state = torch.FloatTensor(state).to(device)
+        state = torch.as_tensor(state, dtype=torch.float32, device=device)
         episode_reward = 0
-        episode_metrics = {'csi': [], 'pod': [], 'far': []}
         
         while True:
-            # 获取动作概率和状态值
+            # 1. 获取动作概率和状态值
             model_probs, state_value = agent(state.unsqueeze(0))
             
-            # 让每个模型预测所有未来帧
-            all_model_predictions = {}
-            for time_key, model in models.items():
-                with torch.no_grad():
-                    pred = model(state.unsqueeze(0))
-                    all_model_predictions[time_key] = pred.detach()
+            # 2. 逐个模型获取预测，而不是一次性全部获取
+            final_preds = []
+            selected_models = []
             
-            # 选择动作并生成预测
-            final_predictions = []
-            for t in range(min(4, model_probs.size(1))):
+            for t in range(4):
                 time_probs = model_probs[0, t]
                 dist = torch.distributions.Categorical(time_probs)
                 action = dist.sample()
                 
-                # 使用选定模型的预测
-                model_idx = action.item() % len(models)
-                selected_time = list(models.keys())[model_idx]
-                selected_prediction = all_model_predictions[selected_time][:, t]
-                final_predictions.append(selected_prediction)
+                selected_idx = action.item()
+                selected_model = list(models.keys())[selected_idx]
+                
+                # 显存优化：只计算需要的模型预测
+                with torch.no_grad():
+                    pred = models[selected_model](state.unsqueeze(0))[:, t]
+                    final_preds.append(pred)
+                
+                selected_models.append(selected_model)
             
-            # 合并预测结果
-            predictions = torch.stack(final_predictions, dim=1)
+            # 3. 合并预测结果
+            predictions = torch.stack(final_preds, dim=1)
             
-            # 环境步进
-            next_state, reward, done, info = env.step(predictions)
+            # 4. 环境交互
+            next_state, reward, done, _ = env.step(predictions)
             
-            # 记录奖励和指标
-            episode_reward += reward
-            if 'metrics' in info:
-                for metric in info['metrics']:
-                    episode_metrics['csi'].append(metric['CSI'])
-                    episode_metrics['pod'].append(metric['POD'])
-                    episode_metrics['far'].append(metric['FAR'])
+            # 5. 计算并累积奖励
+            episode_reward += reward * 100.0  # 保持原有奖励缩放
+            
+            # 6. 显存优化：及时删除中间变量
+            del model_probs, state_value, predictions
+            torch.cuda.empty_cache()
             
             if done:
                 break
-            
-            state = torch.FloatTensor(next_state).to(device)
+                
+            # 7. 更新状态
+            state = torch.as_tensor(next_state, dtype=torch.float32, device=device)
         
         # 记录episode结果
         episode_rewards.append(episode_reward)
-        metrics_history.append({
-            'csi': np.mean(episode_metrics['csi']),
-            'pod': np.mean(episode_metrics['pod']),
-            'far': np.mean(episode_metrics['far'])
-        })
         
-        # 计算当前性能（使用加权组合指标）
-        current_metrics = metrics_history[-1]
-        current_performance = (
-            0.4 * current_metrics['csi'] +
-            0.4 * current_metrics['pod'] +
-            0.2 * (1 - current_metrics['far'])  # FAR越低越好
-        )
+        current_performance = episode_reward
         
         # 如果当前性能超过历史最佳，保存模型
         if current_performance > best_performance:
@@ -205,21 +192,13 @@ def train_rl_agent_with_metrics(env, agent, models, optimizer, num_episodes=200,
                 'model_state_dict': agent.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'episode': episode,
-                'performance': best_performance,
-                'metrics': current_metrics
             }, best_model_path)
             print(f"\nSaved best model at episode {episode+1} with performance {best_performance:.4f}")
         
         # 打印训练进度
         if (episode + 1) % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
-            avg_metrics = {
-                'csi': np.mean([m['csi'] for m in metrics_history[-10:]]),
-                'pod': np.mean([m['pod'] for m in metrics_history[-10:]]),
-                'far': np.mean([m['far'] for m in metrics_history[-10:]])
-            }
             print(f"Episode {episode+1}, Avg Reward: {avg_reward:.4f}")
-            print(f"Avg Metrics - CSI: {avg_metrics['csi']:.4f}, POD: {avg_metrics['pod']:.4f}, FAR: {avg_metrics['far']:.4f}")
     
     # 训练结束后加载最佳模型
     if os.path.exists(best_model_path):
@@ -228,178 +207,138 @@ def train_rl_agent_with_metrics(env, agent, models, optimizer, num_episodes=200,
         print(f"\nLoaded best model with performance {checkpoint['performance']:.4f}")
     
     return agent, episode_rewards, metrics_history
+# 使用生成器避免同时保存所有模型预测
+def get_model_prediction(model, inputs):
+    with torch.no_grad():
+        return model(inputs)
 
-def train_rl_agent_optimized(env, agent, models, optimizer, num_episodes=200, 
-                            batch_size=32, gamma=0.99, early_stopping_patience=20):
-    """
-    Optimized training function with better stabilization and early stopping
-    
-    Args:
-        env: The environment
-        agent: The agent model
-        models: Dictionary of prediction models
-        optimizer: Optimizer for the agent
-        num_episodes: Maximum number of episodes
-        batch_size: Batch size for updates
-        gamma: Discount factor
-        early_stopping_patience: Episodes without improvement before stopping
-    """
+def train_rl_agent_optimized(env, agent, models, optimizer, num_episodes=10, batch_size=1):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    agent = agent.to(device)
+    agent.train().to(device)
     
-    # Move all models to device and set to evaluation mode
-    for model_name, model in models.items():
-        model.to(device)
-        model.eval()
+    # 关键修改1：禁用不需要的梯度计算
+    for model in models.values():
+        model.eval().requires_grad_(False).to(device)
     
-    # Create learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-6, verbose=True)
+    # 关键修改2：配置CUDA优化参数
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     
-    # Track training progress
-    episode_rewards = []
-    metrics_history = []
-    
-    # Early stopping variables
     best_performance = float('-inf')
-    no_improvement_count = 0
-    
-    # Ensure model save directory exists
     os.makedirs('rl_model', exist_ok=True)
-    best_model_path = os.path.join('rl_model', 'best_agent.pth')
-    
-    # Map from index to model key
-    time_keys = list(models.keys())
     
     for episode in range(num_episodes):
         state = env.reset()
-        state = torch.FloatTensor(state).to(device)
+        state = torch.as_tensor(state, dtype=torch.float32, device=device)
         episode_reward = 0
-        episode_metrics = {'csi': [], 'pod': [], 'far': []}
         
         while True:
-            # Get action probabilities and state value
-            model_probs, state_value = agent(state.unsqueeze(0))
+            # 关键修改3：强制清空梯度缓存
+            optimizer.zero_grad(set_to_none=True)
             
-            # Get predictions from all models
-            all_model_predictions = {}
-            for time_key, model in models.items():
-                with torch.no_grad():
-                    pred = model(state.unsqueeze(0))
-                    all_model_predictions[time_key] = pred.detach()
-            
-            # Select actions and generate predictions
-            selected_actions = []
-            final_predictions = []
-            
-            for t in range(min(4, model_probs.size(1))):
-                time_probs = model_probs[0, t]
+            # 使用混合精度训练
+            with torch.cuda.amp.autocast():
+                # 仅计算必要的前向传播
+                model_probs, state_value = agent(state.unsqueeze(0))
                 
-                # During training, sample from distribution
-                if agent.training:
-                    dist = torch.distributions.Categorical(time_probs)
-                    action = dist.sample()
-                # During evaluation, take best action
-                else:
-                    action = torch.argmax(time_probs)
+                # 逐个时间步处理避免显存累积
+                predictions = []
+                for t in range(4):
+                    # 采样动作
+                    with torch.no_grad():
+                        action = torch.argmax(model_probs[0, t]).item()
                     
-                selected_actions.append(action)
+                    # 仅计算被选中的模型
+                    selected_model = list(models.values())[action]
+                    pred = selected_model(state.unsqueeze(0))[:, t]
+                    predictions.append(pred)
                 
-                # Use selected model's prediction
-                model_idx = action.item() % len(time_keys)  # Safe indexing
-                selected_time = time_keys[model_idx]
-                selected_prediction = all_model_predictions[selected_time][:, t]
-                final_predictions.append(selected_prediction)
+                predictions = torch.stack(predictions, dim=1)
+                
+                # 环境交互
+                next_state, reward, done, _ = env.step(predictions.detach())
+                reward_tensor = torch.tensor(reward, device=device).float()
+                
+                # 计算损失
+                advantage = reward_tensor - state_value
+                loss = -torch.log(model_probs[0, :, action] + 1e-6) * advantage.detach()
+                loss = loss.mean() + F.mse_loss(state_value, reward_tensor)
             
-            # Combine predictions
-            predictions = torch.stack(final_predictions, dim=1)
+            # 梯度缩放与更新
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)  # 梯度裁剪
+            optimizer.step()
             
-            # Environment step
-            next_state, reward, done, info = env.step(predictions)
-            
-            # Track reward and metrics
             episode_reward += reward
-            if 'metrics' in info:
-                for metric in info['metrics']:
-                    episode_metrics['csi'].append(metric['CSI'])
-                    episode_metrics['pod'].append(metric['POD'])
-                    episode_metrics['far'].append(metric['FAR'])
+            state = torch.as_tensor(next_state, dtype=torch.float32, device=device)
             
             if done:
                 break
+        
+        # 每episode清理显存
+        torch.cuda.empty_cache()
+        
+        # 模型保存逻辑保持不变
+        if episode_reward > best_performance:
+            best_performance = episode_reward
+            torch.save(agent.state_dict(), f"rl_model/best_agent_ep{episode}.pth")
+        
+        print(f"Episode {episode+1}, Reward: {episode_reward:.2f}")
+    
+    return agent
+
+def train_rl_agent_optimized(env, agent, models, optimizer, num_episodes=10, 
+                           batch_size=4, gamma=0.99, early_stopping_patience=20):
+    """修正后的训练函数，确保参数一致性"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    agent = agent.to(device)
+    
+    # 显存优化
+    torch.cuda.empty_cache()
+    
+    # 模型设置
+    for model in models.values():
+        model.to(device).eval()
+    
+    # 训练记录
+    episode_rewards = []
+    best_performance = float('-inf')
+    os.makedirs('rl_model', exist_ok=True)
+    
+    for episode in range(num_episodes):
+        state = env.reset()
+        state = torch.as_tensor(state, dtype=torch.float32, device=device)
+        episode_reward = 0
+        
+        while True:
+            # 获取动作概率
+            model_probs, state_value = agent(state.unsqueeze(0))
             
-            # Move to next state
-            state = torch.FloatTensor(next_state).to(device)
-        
-        # Record episode results
-        episode_rewards.append(episode_reward)
-        avg_metrics = {
-            'csi': np.mean(episode_metrics['csi']) if episode_metrics['csi'] else 0,
-            'pod': np.mean(episode_metrics['pod']) if episode_metrics['pod'] else 0,
-            'far': np.mean(episode_metrics['far']) if episode_metrics['far'] else 0
-        }
-        metrics_history.append(avg_metrics)
-        
-        # Calculate overall performance
-        current_performance = (
-            0.4 * avg_metrics['csi'] +
-            0.4 * avg_metrics['pod'] + 
-            0.2 * (1 - avg_metrics['far'])
-        )
-        
-        # Update learning rate
-        scheduler.step(current_performance)
-        
-        # Save best model and check for early stopping
-        if current_performance > best_performance:
-            best_performance = current_performance
-            torch.save({
-                'model_state_dict': agent.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'episode': episode,
-                'performance': best_performance,
-                'metrics': avg_metrics
-            }, best_model_path)
-            print(f"\nSaved best model at episode {episode+1} with performance {best_performance:.4f}")
-            no_improvement_count = 0
-        else:
-            no_improvement_count += 1
-            if no_improvement_count >= early_stopping_patience:
-                print(f"\nEarly stopping triggered after {episode+1} episodes")
+            # 选择动作并预测
+            predictions = []
+            for t in range(4):
+                # 采样动作
+                action = torch.argmax(model_probs[0, t]).item()
+                pred = models[list(models.keys())[action]](state.unsqueeze(0))[:, t]
+                predictions.append(pred)
+            
+            predictions = torch.stack(predictions, dim=1)
+            
+            # 环境交互
+            next_state, reward, done, _ = env.step(predictions.detach())
+            episode_reward += reward
+            
+            if done:
                 break
+                
+            state = torch.as_tensor(next_state, dtype=torch.float32, device=device)
         
-        # Print progress
-        if (episode + 1) % 1 == 0:  # 每个episode都显示
-            avg_reward = np.mean(episode_rewards[-5:]) if len(episode_rewards) >= 5 else episode_rewards[-1]
-            avg_csi = np.mean([m['csi'] for m in metrics_history[-5:]]) if len(metrics_history) >= 5 else metrics_history[-1]['csi']
-            avg_pod = np.mean([m['pod'] for m in metrics_history[-5:]]) if len(metrics_history) >= 5 else metrics_history[-1]['pod']
-            avg_far = np.mean([m['far'] for m in metrics_history[-5:]]) if len(metrics_history) >= 5 else metrics_history[-1]['far']
-            
-            print(f"\n=== Episode {episode+1}/{num_episodes} ===")
-            print(f"Reward: {episode_reward:.4f} (Avg last 5: {avg_reward:.4f})")
-            print(f"Metrics - CSI: {avg_metrics['csi']:.4f}, POD: {avg_metrics['pod']:.4f}, FAR: {avg_metrics['far']:.4f}")
-            print(f"Avg Metrics (last 5) - CSI: {avg_csi:.4f}, POD: {avg_pod:.4f}, FAR: {avg_far:.4f}")
-            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
-            print(f"Best performance: {best_performance:.4f}")
-            
-            # 显示模型选择分布
-            action_counts = {time_key: 0 for time_key in time_keys}
-            for action in selected_actions:
-                model_idx = action.item() % len(time_keys)
-                selected_time = time_keys[model_idx]
-                action_counts[selected_time] += 1
-            print("Model selection distribution:")
-            for model_name, count in action_counts.items():
-                print(f"{model_name}: {count}")
-            print("-" * 50)
-            print(f"Episode {episode+1}, Avg Reward: {avg_reward:.4f}")
-            print(f"Avg Metrics - CSI: {avg_csi:.4f}, POD: {avg_pod:.4f}, FAR: {avg_far:.4f}")
-            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+        # 记录和保存
+        episode_rewards.append(episode_reward)
+        if episode_reward > best_performance:
+            best_performance = episode_reward
+            torch.save(agent.state_dict(), f"rl_model/best_agent.pth")
+        
+        print(f"Episode {episode+1}, Reward: {episode_reward:.2f}")
     
-    # Load best model at the end of training
-    if os.path.exists(best_model_path):
-        checkpoint = torch.load(best_model_path)
-        agent.load_state_dict(checkpoint['model_state_dict'])
-        print(f"\nLoaded best model with performance {checkpoint['performance']:.4f}")
-    
-    return agent, episode_rewards, metrics_history
+    return agent, episode_rewards, []

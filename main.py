@@ -272,7 +272,7 @@ def evaluate_system():
         num_workers=opt.num_workers
     )
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     
     # 加载训练好的模型
     models = {
@@ -294,7 +294,7 @@ def evaluate_system():
         num_models=len(models),
         input_size=(280,360)
     ).to(device)
-    agent.load_state_dict(torch.load(os.path.join('rl_model', 'best_agent.pth'))['model_state_dict'])
+    agent.load_state_dict(torch.load(os.path.join('rl_model', 'best_agent.pth')))
     agent.eval()
     
     # 评估结果
@@ -365,7 +365,7 @@ def evaluate_system():
                 # 第二行：智能体预测的四个时间步
                 for t in range(len(time_steps)):
                     plt.subplot(rows, cols, cols + 1 + t)
-                    pred_frame = agent_predictions[0, t].cpu().numpy()
+                    pred_frame = denormalize(agent_predictions[0, t]).cpu().numpy()
                     plt.title(f'Agent t+{t+1}')
                     img = plt.imshow(pred_frame, cmap=my_map, norm=norm)
                     plt.colorbar(img, fraction=0.046, pad=0.04)
