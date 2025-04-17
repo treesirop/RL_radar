@@ -31,8 +31,13 @@ class DataSet(data.Dataset):
 
         radar_data_tensor = torch.from_numpy(radar_data).float().unsqueeze(0)
         target_reg_tensor = torch.from_numpy(target_reg).float().unsqueeze(0)
+        
+        # Resize radar_data from 270x350 to 280x360 using bilinear interpolation
+        radar_data_resized = F.interpolate(radar_data_tensor, size=(280, 360), mode='bilinear', align_corners=False).squeeze(0)
+        # Resize target_reg from 270x350 to 280x360 using bilinear interpolation
+        target_reg_resized = F.interpolate(target_reg_tensor, size=(280, 360), mode='bilinear', align_corners=False).squeeze(0)
 
-        return radar_data_tensor, target_reg_tensor
+        return radar_data_resized, target_reg_resized
 
     def __len__(self):
         return self.load_count

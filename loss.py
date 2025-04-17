@@ -5,10 +5,12 @@ import torch.nn as nn
 import numpy as np
 import math
 
+from config import DefaultConfigure
+opt = DefaultConfigure()
 class RegLoss(nn.Module):
     def __init__(self, task_num=4, v=[math.log(0.5)], 
                  mse_weight=0.4, mae_weight=0.6, NORMAL_LOSS_GLOBAL_SCALE=0.00005, 
-                 width=350, height=270):
+                 width=280, height=360):
         super(RegLoss, self).__init__()
         self.NORMAL_LOSS_GLOBAL_SCALE = NORMAL_LOSS_GLOBAL_SCALE
         self.mse_weight = mse_weight
@@ -60,7 +62,7 @@ class RegLoss(nn.Module):
         # 计算平衡权重
         balancing_weights = (1, 2, 5, 10, 40)   
         weights_tensor = torch.ones_like(output_reg) * balancing_weights[0]   
-        thresholds = [self._norm(ele) for ele in balancing_weights[:-1]]  # 排除最后一个权重
+        thresholds = [self._norm(ele) for ele in balancing_weights[:-1]]  
         for i, threshold in enumerate(thresholds):       
             weights_tensor = weights_tensor + (balancing_weights[i + 1] - balancing_weights[i]) * (label_reg >= threshold).float() 
         
@@ -113,14 +115,13 @@ class RegLoss(nn.Module):
         self.logs.write(log_str + "\n")
         self.logs.flush()
         
-        # 返回最终的损失值用于反向传播
         return torch.mean(loss)
 
 
 # 针对特定时间点的损失函数类
 class RegLoss30(RegLoss):
-    def forward(self, output_reg, label_reg):
-        return super().forward(output_reg, label_reg, focus_time='30')
+    def forward(self, output_reg,  label_reg):
+        return super().forward(output_reg,  label_reg, focus_time='30')
 
 
 class RegLoss60(RegLoss):

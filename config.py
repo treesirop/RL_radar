@@ -27,6 +27,8 @@ class DefaultConfigure(object):
     device = '1'
 
     batch_size = 4
+    agent_batch_size = 16
+    agent_epochs = 200
     num_workers = 4
     display = 100
     snapshot = 4000

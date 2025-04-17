@@ -65,7 +65,7 @@ class OptimizedRadarEnvironment:
             
             for t in range(min(self.output_seq_len, len(action))):
                 # Ensure prediction and ground truth are numpy arrays with matching shapes
-                # Extract prediction for current time step t
+                # pred_t = action[t].cpu().numpy() if isinstance(action[t], torch.Tensor) else action[t]
                 pred_t = action[:, t].cpu().numpy() if isinstance(action, torch.Tensor) else action[t]
                 true_t = true_future[t].cpu().numpy() if isinstance(true_future[t], torch.Tensor) else true_future[t]
                 

@@ -73,14 +73,11 @@ class OptimizedTemporalModelSelectorAgent(nn.Module):
         original_shape = x.shape
         batch_size = x.size(0)
         
-        print(f"Input shape: {original_shape}")
-        
         # Handle case where input is [batch_size, seq_len, height, width]
         if len(original_shape) == 4 and original_shape[1] > 1:
             # Reshape to [batch_size * seq_len, 1, height, width]
             seq_len = original_shape[1]
             x = x.view(batch_size * seq_len, 1, original_shape[2], original_shape[3])
-            print(f"Reshaped to: {x.shape}")
             
             # Process through feature extractor
             features = self.feature_extractor(x)
@@ -101,6 +98,7 @@ class OptimizedTemporalModelSelectorAgent(nn.Module):
             raise ValueError(f"Unsupported input shape: {original_shape}")
         
         # Process through FC layers
+        # fc_features = self.fc(features)
         if features.size(0) == 1 and self.training:
             # During training with single sample, temporarily use eval mode for BatchNorm
             self.fc.eval()
@@ -109,7 +107,6 @@ class OptimizedTemporalModelSelectorAgent(nn.Module):
             self.fc.train()
         else:
             fc_features = self.fc(features)
-        
         # Generate model selection probabilities
         model_probs = []
         for policy_head in self.policy_heads:

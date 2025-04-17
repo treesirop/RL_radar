@@ -2,7 +2,7 @@
 # !/usr/bin/python
 from matplotlib import colors
 from CSI import calc_CSI_reg
-from loss import RegLoss120, RegLoss30, RegLoss60, RegLoss90
+from loss import MyLoss120, MyLoss30, MyLoss60, MyLoss90
 from config import DefaultConfigure
 import torch
 import torch.nn as nn
@@ -129,13 +129,13 @@ def train_models():
                 # 使用特定时间点的损失函数
                  # Ensure loss function is on same device
                 if time == '30':
-                    loss_func = RegLoss30().to(device)
+                    loss_func = MyLoss30().to(device)
                 elif time == '60':
-                    loss_func = RegLoss60().to(device)
+                    loss_func = MyLoss60().to(device)
                 elif time == '90':
-                    loss_func = RegLoss90().to(device)
+                    loss_func = MyLoss90().to(device)
                 elif time == '120':
-                    loss_func = RegLoss120().to(device)
+                    loss_func = MyLoss120().to(device)
                 
                 # 计算损失
                 loss = loss_func(outputs, targets)
@@ -372,34 +372,35 @@ def evaluate_system():
                     plt.axis('off')
 
                 # 后续行：各专家模型的预测结果（每行4个）
+                # 修改后的绘图逻辑
                 for model_idx, (model_time, model) in enumerate(models.items()):
                     with torch.no_grad():
                         preds = model(inputs).cpu()
                     
-                    # 获取该模型预测的时间步索引映射
-                    time_mapping = {t: t//int(model_time) - 1 for t in time_steps}
+                    # 获取该模型对应的时间步索引映射
+                    time_step_mapping = {
+                        30: 0,   # 所有模型预测的第一个时间步对应30分钟
+                        60: 1,   # 第二个时间步对应60分钟
+                        90: 2,   # 第三个时间步对应90分钟
+                        120: 3   # 第四个时间步对应120分钟
+                    }
                     
                     for col_idx, t in enumerate(time_steps):
-                        # 计算子图位置
                         subplot_pos = (2 + model_idx) * cols + col_idx + 1
-                        
-                        # 跳过超出总子图数的情况
                         if subplot_pos > rows * cols:
                             continue
                         
                         plt.subplot(rows, cols, subplot_pos)
                         
-                        # 处理索引越界
-                        pred_step = time_mapping[t]
+                        # 获取正确的时间步索引
+                        pred_step = time_step_mapping[t]
                         pred_step = max(0, min(pred_step, preds.shape[1]-1))
                         
-                        # 只绘制该模型对应的时间步
-                        if t % int(model_time) == 0:
-                            pred_frame = denormalize(preds[0, pred_step]).numpy()
-                            plt.title(f"{model_time}min Model\nt+{t}min")
-                            img = plt.imshow(pred_frame, cmap=my_map, norm=norm)
-                            plt.colorbar(img, fraction=0.046, pad=0.04)
-                            plt.axis('off')
+                        pred_frame = denormalize(preds[0, pred_step]).numpy()
+                        plt.title(f"{model_time}min Model\nt+{t}min")
+                        img = plt.imshow(pred_frame, cmap=my_map, norm=norm)
+                        plt.colorbar(img, fraction=0.046, pad=0.04)
+                        plt.axis('off')
                     
                 plt.tight_layout()
                 plt.savefig(f'result/comparison_batch{batch_idx}_time.png', dpi=150, bbox_inches='tight')
