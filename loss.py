@@ -210,3 +210,34 @@ class MyLoss90(MyLoss):
 class MyLoss120(MyLoss):
     def forward(self, output_reg, label_reg):
         return super().forward(output_reg, label_reg, focus_time='120')
+    
+class Loss(nn.Module):
+    def __init__(self, task_num = 2, v = [0, math.log(0.5)], mse_weight=0.4, mae_weight=0.6, NORMAL_LOSS_GLOBAL_SCALE=0.00005):
+        super(Loss, self).__init__()
+        self.NORMAL_LOSS_GLOBAL_SCALE = NORMAL_LOSS_GLOBAL_SCALE
+        self.mse_weight = mse_weight
+        self.mae_weight = mae_weight
+        self.loss_func_reg_1 = nn.MSELoss(reduction='none')
+        self.loss_func_reg_2 = nn.L1Loss(reduction='none')
+        self.task_num = task_num
+        self.log_vars = nn.Parameter(torch.tensor(v))       
+        
+    def forward(self, output_reg, label_reg):
+        balancing_weights = opt.balancing_weights     
+        weights = torch.ones_like(output_reg) * balancing_weights[0]   
+        thresholds = [self._norm(ele) for ele in opt.thresholds]  
+        for i, threshold in enumerate(thresholds):       
+            weights = weights + (balancing_weights[i + 1] - balancing_weights[i]) * (label_reg >= threshold).float()         
+        loss_reg_1 = self.loss_func_reg_1(output_reg, label_reg)      
+        loss_reg_1 = (loss_reg_1 * weights).sum(dim=(1, 2, 3))         
+        loss_reg_2 = self.loss_func_reg_2(output_reg, label_reg)
+        loss_reg_2 = (loss_reg_2 * weights).sum(dim=(1, 2, 3)) #(b, )
+        loss_reg = self.NORMAL_LOSS_GLOBAL_SCALE * (self.mse_weight*loss_reg_1 + self.mae_weight*loss_reg_2)                
+        loss_reg = loss_reg.unsqueeze(1)   #(b, 1)
+        precision2 = torch.exp(-self.log_vars[1])
+        loss = torch.sum(0.5 * precision2 * loss_reg + abs(self.log_vars[1]), -1)
+        loss = torch.mean(loss)
+        return loss
+        
+    def _norm(self, ele):
+        return ele / 80.0   

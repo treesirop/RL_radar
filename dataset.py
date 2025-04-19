@@ -26,7 +26,7 @@ class DataSet(data.Dataset):
                 raise IndexError("Index out of range for radar_list")
         
         with h5py.File(self.radar_list[index], 'r') as fhandle:
-            radar_data = fhandle[u'data'][:].astype(np.float32)
+            radar_data = fhandle[u'data'][1::2].astype(np.float32)
             target_reg = fhandle[u'label'][4::5].astype(np.float32)
 
         radar_data_tensor = torch.from_numpy(radar_data).float().unsqueeze(0)
