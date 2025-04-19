@@ -5,15 +5,15 @@ import torch.nn.functional as F
 import numpy as np
 from CSI import calc_CSI_reg
 
-class OptimizedRadarEnvironment:
+class OptimizedRadarEnvironment():
     def __init__(self, dataset, input_seq_len=10, output_seq_len=4, thresholds=(25, 35, 45, 55)):
         """
         Optimized radar environment with better rewards and error handling
-        
+
         Args:
             dataset: The radar dataset
             input_seq_len: Input sequence length
-            output_seq_len: Output sequence length 
+            output_seq_len: Output sequence length
             thresholds: Rainfall intensity thresholds for evaluation
         """
         self.dataset = dataset
@@ -21,115 +21,83 @@ class OptimizedRadarEnvironment:
         self.output_seq_len = output_seq_len
         self.current_index = 0
         self.max_index = len(dataset)
-        
+
         # Multiple thresholds for better evaluation
         self.thresholds = thresholds
-        
-        # Metric weights for reward calculation
-        self.metric_weights = {
-            'csi': 0.4,  # Critical Success Index
-            'pod': 0.3,  # Probability of Detection
-            'far': 0.3   # False Alarm Rate
-        }
-        
+
     def reset(self):
         """Reset the environment to a new starting point"""
         # Randomize starting point for better exploration
         self.current_index = np.random.randint(0, self.max_index)
         self.episode_steps = 0
-        
-        try:
-            input_seq, _ = self.dataset[self.current_index]
-            return input_seq
-        except Exception as e:
-            print(f"Error during environment reset: {e}")
-            # Fallback to a safe starting point
-            self.current_index = 0
-            input_seq, _ = self.dataset[0]
-            return input_seq
-    
+
+        input_seq, _ = self.dataset[self.current_index]
+        return input_seq
+
     def step(self, action):
-        """
-        Execute action (prediction) and return next state, reward, done, info
-        
-        Args:
-            action: Predicted future sequence
-        """
-        try:
-            # Get ground truth for the current sample
-            _, true_future = self.dataset[self.current_index]
-            
-            # Calculate rewards and metrics for each time step
-            rewards = []
-            metrics = []
-            
-            for t in range(min(self.output_seq_len, len(action))):
-                # Ensure prediction and ground truth are numpy arrays with matching shapes
-                # pred_t = action[t].cpu().numpy() if isinstance(action[t], torch.Tensor) else action[t]
-                pred_t = action[:, t].cpu().numpy() if isinstance(action, torch.Tensor) else action[t]
-                true_t = true_future[t].cpu().numpy() if isinstance(true_future[t], torch.Tensor) else true_future[t]
-                
-                # Reshape tensors if necessary to match dimensions
-                if len(pred_t.shape) > 2:  # Handle any extra dimensions
-                    pred_t = pred_t.squeeze()
-                if len(true_t.shape) > 2:
-                    true_t = true_t.squeeze()
-                
-                # Ensure both arrays are 2D
-                if len(pred_t.shape) == 1:
-                    pred_t = pred_t.reshape(-1, 1)
-                if len(true_t.shape) == 1:
-                    true_t = true_t.reshape(-1, 1)
-                
-                # Evaluate at primary threshold (35 dBZ)
-                try:
-                    csi, pod, far = calc_CSI_reg(pred_t, true_t, threshold=35.0)
-                except ValueError as e:
-                    print(f"Shape mismatch - pred: {pred_t.shape}, true: {true_t.shape}")
-                    raise e
-                
-                # Calculate weighted reward
-                reward_t = (
-                    self.metric_weights['csi'] * csi + 
-                    self.metric_weights['pod'] * pod + 
-                    self.metric_weights['far'] * (1 - far)  # Lower FAR is better
-                )
-                
-                # Apply time-based weighting (earlier predictions more important)
-                time_weight = 1.0 / (1.0 + 0.1 * t)
-                reward_t *= time_weight
-                
-                rewards.append(reward_t)
-                metrics.append({'CSI': csi, 'POD': pod, 'FAR': far})
-            
-            # Advance to next sample
-            self.current_index = (self.current_index + 1) % self.max_index
-            self.episode_steps += 1
-            
-            # Episode terminates after one complete epoch or max steps
-            done = (self.current_index == 0) or (self.episode_steps >= 100)
-            
-            # Get next state if not done
-            if not done:
-                next_input, _ = self.dataset[self.current_index]
-                next_state = next_input
-            else:
-                next_state = None
-            
-            # Total reward is sum of all time step rewards
-            total_reward = sum(rewards) if rewards else 0.0
-            
-            return next_state, total_reward, done, {
-                'rewards_per_step': rewards,
-                'metrics': metrics,
-                'episode_steps': self.episode_steps
-            }
-        
-        except Exception as e:
-            print(f"Error in environment step: {str(e)}")
-            # Provide informative error and safe fallback
-            return self.reset(), -1.0, True, {
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "current_index": self.current_index
-            }
+        """Execute action (prediction) and return next state, reward, done, info"""
+        # Get ground truth for the current sample
+        _, true_future = self.dataset[self.current_index]
+
+        # Ensure action is detached and moved to CPU before numpy conversion
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+        if isinstance(true_future, torch.Tensor):
+            true_future = true_future.detach().cpu().numpy()
+
+        # Ensure true_future also has the correct shape
+        if true_future.ndim == 2:  # [H,W]
+            true_future = true_future[np.newaxis, np.newaxis, ...]  # Add batch and time dims
+        elif true_future.ndim == 3:  # [T,H,W]
+            true_future = true_future[np.newaxis, ...]  # Add batch dim
+
+        # Handle single sample case
+        if action.ndim == 2:  # [H,W]
+            action = action[np.newaxis, np.newaxis, ...]  # Add batch and time dims
+        elif action.ndim == 3:  # [T,H,W]
+            action = action[np.newaxis, ...]  # Add batch dim
+
+
+        # 1. Calculate MSE for each time step
+        mse = np.mean([(pred_t - true_t)**2 for t, (pred_t, true_t) in enumerate(zip(action[0], true_future[0]))])
+        max_mse = 100.0  # 根据数据特性设定的最大可能MSE
+        norm_mse = mse / max_mse  # 归一化到[0,1]
+        mse_reward = -norm_mse  # [-1, 0]
+
+        # 2. CSI奖励（鼓励预测与实际的重叠）
+        csi_scores = []
+        for t in range(len(true_future[0])):
+            csi, _, _ = calc_CSI_reg(action[0, t], true_future[0, t], threshold=35)
+            csi_scores.append(csi)
+        csi_reward = np.mean(csi_scores)  # [0,1]
+
+        # 3. 时序一致性奖励（鼓励预测序列平滑）
+        temporal_penalty = 0
+        if len(action[0]) > 1:
+            diffs = np.diff(action[0], axis=0)
+            temporal_penalty = -0.1 * np.mean(np.abs(diffs))  # 小幅惩罚剧烈变化
+
+        # 4. 极端事件奖励（特别关注强降水）
+        extreme_reward = 0
+        for t in range(len(true_future[0])):
+            true_extreme = (true_future[0, t] > 45).sum()
+            pred_extreme = (action[0, t] > 45).sum()
+            extreme_reward += 1.0 - min(1.0, abs(true_extreme - pred_extreme) / (true_extreme + 1e-6))
+        extreme_reward /= len(true_future[0])
+
+        # 组合奖励（可调整权重）
+        reward = (
+            0.4 * mse_reward +
+            0.3 * csi_reward +
+            0.1 * temporal_penalty +
+            0.2 * extreme_reward
+        )
+
+        # Advance to next sample
+        self.current_index = (self.current_index + 1) % self.max_index
+        self.episode_steps += 1
+
+        done = (self.episode_steps >= 100)
+        next_state = self.dataset[self.current_index][0] if not done else None
+
+        return next_state, reward, done, {}
